@@ -465,8 +465,10 @@ func (cfg *config) checkOneLeader() int {
 func (cfg *config) checkTerms() int {
 	term := -1
 	for i := 0; i < cfg.n; i++ {
+
 		if cfg.connected[i] {
 			xterm, _ := cfg.rafts[i].GetState()
+			DPrintf("peer[%d] CurrentTerm= [%d]", i, xterm)
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {

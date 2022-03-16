@@ -28,6 +28,16 @@ import (
 	"6.824/labrpc"
 )
 
+type State int
+
+const (
+	Follower State = iota
+	Candidate
+	Leader
+)
+
+const NonVote = -1
+
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -65,18 +75,20 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	currentTerm int
-	votedFor    int
+	CurrentTerm int
+	VotedFor    int
+
+	State State
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	var term int
-	var isleader bool
 	// Your code here (2A).
-	return term, isleader
+	return rf.CurrentTerm, rf.State == Leader
 }
 
 //
@@ -145,9 +157,9 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 
 	// candidate's term.
-	term int
+	Term int
 	// candidate requesting vote.
-	candidateId int
+	CandidateId int
 
 	lastLogIndex int
 	lastLogTerm  int
@@ -161,18 +173,28 @@ type RequestVoteReply struct {
 	// Your data here (2A).
 
 	// currentTerm, for candidate to update itself.
-	term int
+	Term int
 	// true means candidate received vote.
-	voteGranted bool
+	VoteGranted bool
 }
 
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	if request.Term > rf.CurrentTerm {
+		rf.turnTo(Follower)
+		rf.CurrentTerm, rf.VotedFor = request.Term, request.CandidateId
+		response.Term, response.VoteGranted = rf.CurrentTerm, true
+
+		DPrintf("peer[%d] CurrentTerm= [%d]", rf.me, rf.CurrentTerm)
+		return
+	}
+
+	if request.Term <= rf.CurrentTerm || rf.VotedFor != NonVote {
+		response.Term, response.VoteGranted = rf.CurrentTerm, false
+	}
 
 }
 
@@ -255,14 +277,53 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
+func (rf *Raft) turnTo(state State) {
+	rf.State = state
+
+	switch state {
+	case Follower:
+
+	case Candidate:
+
+	case Leader:
+
+	}
+
+}
+
 func (rf *Raft) election() {
 
-	for _, peer := range rf.peers {
-		go func() {
-			args := &RequestVoteArgs{}
-			reply := &RequestVoteReply{}
-			if peer.Call("Raft.RequestVote", args, reply) {
+	rf.turnTo(Candidate)
+	rf.mu.Lock()
 
+	rf.CurrentTerm += rand.Intn(200)
+	rf.VotedFor = rf.me
+	grantedVotes := 1
+	rf.mu.Unlock()
+
+	for i, _ := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+
+		go func() {
+			request := &RequestVoteArgs{
+				Term:        rf.CurrentTerm,
+				CandidateId: rf.me,
+			}
+			response := &RequestVoteReply{}
+
+			if rf.sendRequestVote(i, request, response) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if response.VoteGranted {
+					grantedVotes++
+					DPrintf("election: Candidate [%d] sendRequestVote Term=%d , grantedVotes = %d \n", rf.me, request.Term, grantedVotes)
+				}
+				if grantedVotes > len(rf.peers)/2 {
+					rf.turnTo(Leader)
+					DPrintf("new leader is [%d]\n", rf.me)
+				}
 			}
 		}()
 
@@ -273,20 +334,15 @@ func (rf *Raft) election() {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
+	electionTimer := time.NewTimer(time.Microsecond * time.Duration(rand.Intn(200)))
 	for rf.killed() == false {
-		electionTimer := time.NewTimer(time.Microsecond * time.Duration(rand.Intn(1000)))
+
 		select {
 		case <-electionTimer.C:
-			rf.mu.Lock()
-			rf.currentTerm++
-			args := &RequestVoteArgs{}
-			reply := &RequestVoteReply{}
-
-			for _, peer := range rf.peers {
-				ok := peer.Call("Raft.RequestVote", args, reply)
+			if rf.VotedFor != NonVote {
+				rf.election()
 			}
 
-			rf.mu.Unlock()
 		}
 
 		// Your code here to check if a leader election should
@@ -313,6 +369,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.State = Follower
 
 	// Your initialization code here (2A, 2B, 2C).
 
