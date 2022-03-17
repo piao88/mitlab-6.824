@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -37,6 +38,11 @@ const (
 )
 
 const NonVote = -1
+
+const (
+	electionTimeout  = 1500 * 1000 * 1000
+	heartBeatTimeout = 150 * 1000 * 1000
+)
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -79,6 +85,32 @@ type Raft struct {
 	VotedFor    int
 
 	State State
+
+	lastHeartBeat int64
+	heartBeatCh   chan bool
+	electionCh    chan bool
+}
+
+func (rf *Raft) heartBeatTick() {
+	for {
+		if _, isLeader := rf.GetState(); isLeader {
+			elapseTime := time.Now().UnixNano() - rf.lastHeartBeat
+			if int(elapseTime/int64(time.Millisecond)) >= electionTimeout {
+				time.Sleep(time.Millisecond * 1000)
+				rf.electionCh <- true
+
+			}
+		}
+	}
+}
+
+func (rf *Raft) electionTick() {
+	for {
+		if _, isLeader := rf.GetState(); !isLeader {
+			rf.electionCh <- true
+			time.Sleep(time.Millisecond * time.Duration(rand.Intn(2000)))
+		}
+	}
 }
 
 // return currentTerm and whether this server
@@ -178,24 +210,8 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-//
-// example RequestVote RPC handler.
-//
-func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply) {
-	// Your code here (2A, 2B).
-	if request.Term > rf.CurrentTerm {
-		rf.turnTo(Follower)
-		rf.CurrentTerm, rf.VotedFor = request.Term, request.CandidateId
-		response.Term, response.VoteGranted = rf.CurrentTerm, true
-
-		DPrintf("peer[%d] CurrentTerm= [%d]", rf.me, rf.CurrentTerm)
-		return
-	}
-
-	if request.Term <= rf.CurrentTerm || rf.VotedFor != NonVote {
-		response.Term, response.VoteGranted = rf.CurrentTerm, false
-	}
-
+func (rf *Raft) HeartBeat(request *RequestVoteArgs, response *RequestVoteReply) {
+	rf.lastHeartBeat = time.Now().UnixNano()
 }
 
 //
@@ -229,6 +245,11 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendHeartBeat(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	ok := rf.peers[server].Call("Raft.HeartBeat", args, reply)
 	return ok
 }
 
@@ -288,19 +309,9 @@ func (rf *Raft) turnTo(state State) {
 	case Leader:
 
 	}
-
 }
 
-func (rf *Raft) election() {
-
-	rf.turnTo(Candidate)
-	rf.mu.Lock()
-
-	rf.CurrentTerm += rand.Intn(200)
-	rf.VotedFor = rf.me
-	grantedVotes := 1
-	rf.mu.Unlock()
-
+func (rf *Raft) BroadcastHeartBeat() {
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
@@ -313,35 +324,103 @@ func (rf *Raft) election() {
 			}
 			response := &RequestVoteReply{}
 
+			if rf.sendHeartBeat(i, request, response) {
+			}
+		}()
+	}
+}
+
+//
+// example RequestVote RPC handler.
+//
+func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply) {
+	// Your code here (2A, 2B).
+	if request.Term > rf.CurrentTerm {
+		rf.turnTo(Follower)
+		rf.CurrentTerm, rf.VotedFor = request.Term, request.CandidateId
+		response.Term, response.VoteGranted = rf.CurrentTerm, true
+
+		DPrintf("RequestVote(): peer[%d] granted from (peer[%d],term[%d]) change to CurrentTerm= [%d]",
+			rf.me, request.CandidateId, request.Term, rf.CurrentTerm)
+		return
+	}
+
+	if request.Term <= rf.CurrentTerm {
+		response.Term, response.VoteGranted = rf.CurrentTerm, false
+
+		DPrintf("RequestVote(): (peer[%d],currentTerm[%d]) reject from (peer[%d],voteTerm[%d])",
+			rf.me, rf.CurrentTerm, request.CandidateId, request.Term)
+
+	}
+}
+
+func (rf *Raft) StartElection() {
+	rf.mu.Lock()
+	rf.turnTo(Candidate)
+	rf.CurrentTerm++
+	rf.VotedFor = rf.me
+	grantedVotes := 1
+	rf.mu.Unlock()
+	var wg sync.WaitGroup
+
+	for i, _ := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, rf *Raft) {
+			request := &RequestVoteArgs{
+				Term:        rf.CurrentTerm,
+				CandidateId: rf.me,
+			}
+			response := &RequestVoteReply{}
+
+			if i == rf.me {
+				fmt.Println("???")
+			}
 			if rf.sendRequestVote(i, request, response) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				if response.VoteGranted {
+				if response.VoteGranted && response.Term == rf.CurrentTerm {
 					grantedVotes++
-					DPrintf("election: Candidate [%d] sendRequestVote Term=%d , grantedVotes = %d \n", rf.me, request.Term, grantedVotes)
+					DPrintf("startElection(): Candidate [%d] sendRequestVote Term=%d , grantedVotes = %d \n", rf.me, request.Term, grantedVotes)
 				}
+
+				if response.Term > rf.CurrentTerm {
+					rf.turnTo(Follower)
+					rf.CurrentTerm, rf.VotedFor = response.Term, -1
+					return
+				}
+
 				if grantedVotes > len(rf.peers)/2 {
 					rf.turnTo(Leader)
-					DPrintf("new leader is [%d]\n", rf.me)
+					DPrintf("StartElection(): peer[%d] thinks new leader is [%d], currentTerm is [%d], grantedVotes are %d\n",
+						rf.me, request.CandidateId, rf.CurrentTerm, grantedVotes)
+
+					//go rf.heartBeatTick()
 				}
 			}
-		}()
-
+			wg.Done()
+		}(i, rf)
 	}
 
+	wg.Wait()
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	electionTimer := time.NewTimer(time.Microsecond * time.Duration(rand.Intn(200)))
 	for rf.killed() == false {
-
 		select {
-		case <-electionTimer.C:
-			if rf.VotedFor != NonVote {
-				rf.election()
-			}
+		case <-rf.electionCh:
+
+			// DPrintf("StartElection\n")
+			go rf.StartElection()
+
+		case <-rf.heartBeatCh:
+
+			// DPrintf("BroadcastHeartBeat\n")
+			go rf.BroadcastHeartBeat()
 
 		}
 
@@ -370,8 +449,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.State = Follower
+	rf.electionCh = make(chan bool)
+	rf.heartBeatCh = make(chan bool)
 
 	// Your initialization code here (2A, 2B, 2C).
+	go rf.electionTick()
+	go rf.heartBeatTick()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

@@ -468,7 +468,7 @@ func (cfg *config) checkTerms() int {
 
 		if cfg.connected[i] {
 			xterm, _ := cfg.rafts[i].GetState()
-			DPrintf("peer[%d] CurrentTerm= [%d]", i, xterm)
+			DPrintf("checkTerms : peer[%d] CurrentTerm=[%d]", i, xterm)
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {
