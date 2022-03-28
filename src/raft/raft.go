@@ -89,13 +89,21 @@ type Raft struct {
 	heartBeatCh   chan bool
 	electionCh    chan bool
 
-	leaderLastHeartBeatRespTime []int
 
+	LogEntries []LogEntry
+
+	leaderLastHeartBeatRespTime []int
 	lastLeaderReply int64
 
 
 
 }
+
+type LogEntry struct {
+	Term    int
+	Command interface{}
+}
+
 
 func (rf *Raft) leaseCheckTick(){
 	for {
@@ -133,7 +141,7 @@ func (rf *Raft) electionTick() {
 		if _, isLeader := rf.GetState(); !isLeader {
 
 			elapseTime := time.Now().UnixNano() - rf.lastHeartBeat
-			if elapseTime > 1000 {
+			if elapseTime > 1000 * 1000 {
 				rf.electionCh <- true
 				time.Sleep(time.Millisecond * time.Duration(rand.Intn(2000)))
 
@@ -143,22 +151,22 @@ func (rf *Raft) electionTick() {
 }
 
 
-func (rf *Raft) checkLeader() {
-	now := int(time.Now().UnixNano())
-	var count int
-	for i,_ := range rf.peers {
-		if i == rf.me {
-			continue
-		}
-		if (now - rf.leaderLastHeartBeatRespTime[i]) < 1500 * 1000 * 1000 {
-			count++
-		}
-	}
-	if count <= len(rf.peers)/2 {
-		rf.turnTo(Follower)
-
-	}
-}
+//func (rf *Raft) checkLeader() {
+//	now := int(time.Now().UnixNano())
+//	var count int
+//	for i,_ := range rf.peers {
+//		if i == rf.me {
+//			continue
+//		}
+//		if (now - rf.leaderLastHeartBeatRespTime[i]) < 1500 * 1000 * 1000 {
+//			count++
+//		}
+//	}
+//	if count <= len(rf.peers)/2 {
+//		rf.turnTo(Follower)
+//
+//	}
+//}
 
 // return currentTerm and whether this server
 // believes it is the leader.
@@ -257,18 +265,32 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-//
-//type HeartBeatRequest struct {
-//
-//
-//}
-//
-//type HeartBeatResponse struct {
-//
-//}
+
+type AppendEntriesRPC struct {
+	// leader's term.
+	term int
+	// leader's id, so follow can redirect client.
+	leaderId int
+	// index of log entry immediately preceding new ones.
+	prevLogIndex int
+	// term of preLogIndex entry.
+	prevLogTerm int
+	// log entries to store.
+	entries []int
+	// leader's commitIndex
+	leaderCommit int
+}
+
+type AppendEntriesResponse struct {
+	// currentTerm, for leader to update itself.
+	term int
+	// true if follower contained entry matching
+	// prevLogIndex and preLogTerm.
+	success int
+}
+
 
 func (rf *Raft) HeartBeat(request *RequestVoteArgs, response *RequestVoteReply) {
-
 
 	//rf.turnTo(Follower)
 	now := time.Now().UnixNano()
@@ -312,7 +334,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) sendHeartBeat(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesRPC, reply *AppendEntriesResponse) bool {
 	ok := rf.peers[server].Call("Raft.HeartBeat", args, reply)
 	return ok
 }
@@ -331,10 +353,21 @@ func (rf *Raft) sendHeartBeat(server int, args *RequestVoteArgs, reply *RequestV
 // term. the third return value is true if this server believes it is
 // the leader.
 //
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
+func (rf *Raft) Start(cmd interface{}) (int, int, bool) {
+	if _,isLeader := rf.GetState(); !isLeader{
+		return -1,-1,false
+	}
+
+	term := rf.CurrentTerm
 	isLeader := true
+	rf.LogEntries = append(rf.LogEntries,LogEntry{
+		Term:     rf.CurrentTerm,
+		Command:  cmd,
+	})
+
+	index := len(rf.LogEntries)-1
+
+
 
 	// Your code here (2B).
 
@@ -374,15 +407,13 @@ func (rf *Raft) turnTo(state State) {
 func (rf *Raft) BroadcastHeartBeat()  {
 
 	for i, _ := range rf.peers {
-
 		if i == rf.me {
 			continue
 		}
 
 		go func() {
-
-			request := &RequestVoteArgs{}
-			response := &RequestVoteReply{}
+			request := &AppendEntriesRPC{}
+			response := &AppendEntriesResponse{}
 
 			if rf.sendHeartBeat(i, request, response) {
 				now := time.Now().UnixNano()
@@ -390,8 +421,6 @@ func (rf *Raft) BroadcastHeartBeat()  {
 					rf.lastLeaderReply = now
 				}
 			}
-
-
 		}()
 	}
 
