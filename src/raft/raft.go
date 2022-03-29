@@ -89,14 +89,14 @@ type Raft struct {
 	heartBeatCh   chan bool
 	electionCh    chan bool
 
-
 	LogEntries []LogEntry
+	matchIndex []int
+	nextIndex []int
 
-	leaderLastHeartBeatRespTime []int
+	//leaderLastHeartBeatRespTime []int
 	lastLeaderReply int64
 
-
-
+	commitIndex int
 }
 
 type LogEntry struct {
@@ -104,17 +104,15 @@ type LogEntry struct {
 	Command interface{}
 }
 
-
-func (rf *Raft) leaseCheckTick(){
+func (rf *Raft) leaseCheckTick() {
 	for {
 		if _, isLeader := rf.GetState(); isLeader {
-			if time.Now().UnixNano() - rf.lastLeaderReply > 1500 * 1000 *1000 {
+			if time.Now().UnixNano()-rf.lastLeaderReply > 1000*1000*1000 {
 				rf.State = Follower
 			}
 		}
 	}
 }
-
 
 //func (rf *Raft) electionTick() {
 //	for {
@@ -134,14 +132,12 @@ func (rf *Raft) heartBeatTick() {
 	}
 }
 
-
-
 func (rf *Raft) electionTick() {
 	for {
 		if _, isLeader := rf.GetState(); !isLeader {
 
 			elapseTime := time.Now().UnixNano() - rf.lastHeartBeat
-			if elapseTime > 1000 * 1000 {
+			if elapseTime > 1000*1000 {
 				rf.electionCh <- true
 				time.Sleep(time.Millisecond * time.Duration(rand.Intn(2000)))
 
@@ -149,7 +145,6 @@ func (rf *Raft) electionTick() {
 		}
 	}
 }
-
 
 //func (rf *Raft) checkLeader() {
 //	now := int(time.Now().UnixNano())
@@ -265,38 +260,46 @@ type RequestVoteReply struct {
 	VoteGranted bool
 }
 
-
 type AppendEntriesRPC struct {
 	// leader's term.
-	term int
+	Term int
 	// leader's id, so follow can redirect client.
-	leaderId int
+	LeaderId int
 	// index of log entry immediately preceding new ones.
-	prevLogIndex int
+	PrevLogIndex int
 	// term of preLogIndex entry.
-	prevLogTerm int
+	PrevLogTerm int
 	// log entries to store.
-	entries []int
+	Entries []interface{}
 	// leader's commitIndex
-	leaderCommit int
+	LeaderCommit int
 }
 
 type AppendEntriesResponse struct {
 	// currentTerm, for leader to update itself.
-	term int
+	Term int
 	// true if follower contained entry matching
 	// prevLogIndex and preLogTerm.
-	success int
+	Success bool
 }
 
-
-func (rf *Raft) HeartBeat(request *RequestVoteArgs, response *RequestVoteReply) {
+func (rf *Raft) HeartBeat(request *AppendEntriesRPC, response *AppendEntriesResponse) {
 
 	//rf.turnTo(Follower)
 	now := time.Now().UnixNano()
 	if rf.lastHeartBeat < now {
 		rf.lastHeartBeat = now
 	}
+}
+
+func (rf *Raft) AppendEntries(req *AppendEntriesRPC, resp *AppendEntriesResponse) {
+  if req.Term < rf.CurrentTerm {
+  	resp.Term = rf.CurrentTerm
+  	resp.Success = false
+  }
+
+
+
 
 }
 
@@ -339,6 +342,11 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesRPC, reply *AppendE
 	return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesRPC, reply *AppendEntriesResponse) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -354,18 +362,46 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesRPC, reply *AppendE
 // the leader.
 //
 func (rf *Raft) Start(cmd interface{}) (int, int, bool) {
-	if _,isLeader := rf.GetState(); !isLeader{
-		return -1,-1,false
+	if _, isLeader := rf.GetState(); !isLeader {
+		return -1, -1, false
 	}
 
 	term := rf.CurrentTerm
 	isLeader := true
-	rf.LogEntries = append(rf.LogEntries,LogEntry{
-		Term:     rf.CurrentTerm,
-		Command:  cmd,
+
+
+
+
+
+	rf.LogEntries = append(rf.LogEntries, LogEntry{
+		Term:    rf.CurrentTerm,
+		Command: cmd,
 	})
 
-	index := len(rf.LogEntries)-1
+	index := len(rf.LogEntries) - 1
+
+	for i,_ := range rf.peers {
+		if i == rf.me {
+			continue
+		}
+
+		go func(i int, rf *Raft){
+			req := &AppendEntriesRPC{
+				Term:         rf.CurrentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: len(rf.LogEntries) - 1,
+				PrevLogTerm:  rf.CurrentTerm,
+				Entries:      []interface{}{cmd},
+				LeaderCommit: rf.commitIndex,
+			}
+			resp := &AppendEntriesResponse{}
+			rf.sendAppendEntries(i,req,resp)
+			if !resp.Success {
+
+			}
+
+		}(i,rf)
+	}
 
 
 
@@ -392,7 +428,7 @@ func (rf *Raft) Kill() {
 	defer rf.mu.Unlock()
 
 	rf.turnTo(Follower)
-	DPrintf("kill peer[%d]",rf.me)
+	DPrintf("kill peer[%d]", rf.me)
 }
 
 func (rf *Raft) killed() bool {
@@ -404,7 +440,7 @@ func (rf *Raft) turnTo(state State) {
 	rf.State = state
 }
 
-func (rf *Raft) BroadcastHeartBeat()  {
+func (rf *Raft) BroadcastHeartBeat() {
 
 	for i, _ := range rf.peers {
 		if i == rf.me {
@@ -478,7 +514,7 @@ func (rf *Raft) StartElection() {
 			if rf.sendRequestVote(i, request, response) {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				if rf.CurrentTerm == request.Term && rf.State == Candidate{
+				if rf.CurrentTerm == request.Term && rf.State == Candidate {
 					if response.VoteGranted && response.Term == request.Term {
 						grantedVotes++
 						DPrintf("startElection(): Candidate [%d] sendRequestVote Term=%d , grantedVotes = %d \n", rf.me, request.Term, grantedVotes)
@@ -494,7 +530,7 @@ func (rf *Raft) StartElection() {
 						rf.turnTo(Leader)
 						DPrintf("StartElection(): peer[%d] thinks new leader is [%d], currentTerm is [%d], grantedVotes are %d\n",
 							rf.me, request.CandidateId, rf.CurrentTerm, grantedVotes)
-						rf.lastLeaderReply  = time.Now().UnixNano()
+						rf.lastLeaderReply = time.Now().UnixNano()
 
 						rf.heartBeatCh <- true
 					}
@@ -552,7 +588,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.State = Follower
 	rf.electionCh = make(chan bool)
 	rf.heartBeatCh = make(chan bool)
-	rf.leaderLastHeartBeatRespTime = make([]int, len(peers))
+
+	rf.matchIndex = make([]int,len(peers))
+	rf.nextIndex = make([]int,len(peers))
 
 	// Your initialization code here (2A, 2B, 2C).
 	go rf.electionTick()
