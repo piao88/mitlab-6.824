@@ -91,7 +91,7 @@ type Raft struct {
 
 	LogEntries []LogEntry
 	matchIndex []int
-	nextIndex []int
+	nextIndex  []int
 
 	//leaderLastHeartBeatRespTime []int
 	lastLeaderReply int64
@@ -102,6 +102,15 @@ type Raft struct {
 type LogEntry struct {
 	Term    int
 	Command interface{}
+}
+
+func (rf *Raft) appendEntries(logEntries ...LogEntry) {
+	for _, entry := range logEntries {
+		rf.LogEntries = append(rf.LogEntries, LogEntry{
+			Term:    entry.Term,
+			Command: entry.Command,
+		})
+	}
 }
 
 func (rf *Raft) leaseCheckTick() {
@@ -135,7 +144,6 @@ func (rf *Raft) heartBeatTick() {
 func (rf *Raft) electionTick() {
 	for {
 		if _, isLeader := rf.GetState(); !isLeader {
-
 			elapseTime := time.Now().UnixNano() - rf.lastHeartBeat
 			if elapseTime > 1000*1000 {
 				rf.electionCh <- true
@@ -270,7 +278,7 @@ type AppendEntriesRPC struct {
 	// term of preLogIndex entry.
 	PrevLogTerm int
 	// log entries to store.
-	Entries []interface{}
+	Entries []LogEntry
 	// leader's commitIndex
 	LeaderCommit int
 }
@@ -292,14 +300,33 @@ func (rf *Raft) HeartBeat(request *AppendEntriesRPC, response *AppendEntriesResp
 	}
 }
 
+func (rf *Raft) getLastLogIndex() int {
+	return len(rf.LogEntries) - 1
+}
+
 func (rf *Raft) AppendEntries(req *AppendEntriesRPC, resp *AppendEntriesResponse) {
-  if req.Term < rf.CurrentTerm {
-  	resp.Term = rf.CurrentTerm
-  	resp.Success = false
-  }
+	resp.Success = false
+	resp.Term = rf.CurrentTerm
 
+	if req.Term < rf.CurrentTerm {
+		resp.Term = rf.CurrentTerm
+	}
 
+	if req.Term > rf.CurrentTerm {
+		rf.CurrentTerm = req.Term
+	}
 
+	lastLogIndex := rf.getLastLogIndex()
+
+	if req.PrevLogIndex < lastLogIndex {
+		return
+	}
+	if rf.LogEntries[req.PrevLogIndex].Term != req.PrevLogTerm {
+		return
+	}
+
+	rf.LogEntries = rf.LogEntries[:req.PrevLogIndex]
+	rf.LogEntries = append(rf.LogEntries, req.Entries...)
 
 }
 
@@ -369,10 +396,6 @@ func (rf *Raft) Start(cmd interface{}) (int, int, bool) {
 	term := rf.CurrentTerm
 	isLeader := true
 
-
-
-
-
 	rf.LogEntries = append(rf.LogEntries, LogEntry{
 		Term:    rf.CurrentTerm,
 		Command: cmd,
@@ -380,30 +403,28 @@ func (rf *Raft) Start(cmd interface{}) (int, int, bool) {
 
 	index := len(rf.LogEntries) - 1
 
-	for i,_ := range rf.peers {
+	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
 		}
 
-		go func(i int, rf *Raft){
+		go func(i int, rf *Raft) {
 			req := &AppendEntriesRPC{
 				Term:         rf.CurrentTerm,
 				LeaderId:     rf.me,
 				PrevLogIndex: len(rf.LogEntries) - 1,
 				PrevLogTerm:  rf.CurrentTerm,
-				Entries:      []interface{}{cmd},
+				//Entries:      LogEntry{Term: rf.CurrentTerm, Command: cmd},
 				LeaderCommit: rf.commitIndex,
 			}
 			resp := &AppendEntriesResponse{}
-			rf.sendAppendEntries(i,req,resp)
+			rf.sendAppendEntries(i, req, resp)
 			if !resp.Success {
 
 			}
 
-		}(i,rf)
+		}(i, rf)
 	}
-
-
 
 	// Your code here (2B).
 
@@ -589,8 +610,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.electionCh = make(chan bool)
 	rf.heartBeatCh = make(chan bool)
 
-	rf.matchIndex = make([]int,len(peers))
-	rf.nextIndex = make([]int,len(peers))
+	rf.matchIndex = make([]int, len(peers))
+	rf.nextIndex = make([]int, len(peers))
 
 	// Your initialization code here (2A, 2B, 2C).
 	go rf.electionTick()
