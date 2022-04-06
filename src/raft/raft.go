@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -346,13 +347,23 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRPC, resp *AppendEntriesResponse
 	//	resp.Success = true
 	//	rf.commitIndex = req.LeaderCommit
 	//}
+	applyStart := rf.commitIndex
 
-	rf.LogEntries = rf.LogEntries[:req.PrevLogIndex]
+	rf.LogEntries = rf.LogEntries[:req.PrevLogIndex+1]
 	rf.LogEntries = append(rf.LogEntries, req.Entries...)
 
 	if len(rf.LogEntries)-1 >= req.LeaderCommit {
 		resp.Success = true
 		rf.commitIndex = req.LeaderCommit
+	}
+
+	for i:= applyStart; i<= rf.commitIndex; i++{
+		//fmt.Printf("peer[%d] apply logEntries[%d] command(%v)\n",rf.me,i,rf.LogEntries[i].Command)
+		go rf.Apply(i,rf.LogEntries[i].Command)
+	}
+
+	for i,entry := range rf.LogEntries {
+		fmt.Printf("peer[%d] logEntries[%d] command(%v)\n",rf.me,i,entry.Command)
 	}
 
 }
@@ -537,6 +548,10 @@ func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
 		Term:    rf.CurrentTerm,
 		Command: cmd,
 	})
+
+	for i,entry := range rf.LogEntries {
+		fmt.Printf("peer[%d] logEntries[%d] command(%v)\n",rf.me,i,entry.Command)
+	}
 
 	operationCh := make(chan Operation)
 	for i, _ := range rf.peers {
