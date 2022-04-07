@@ -74,7 +74,7 @@ func TestReElection2A(t *testing.T) {
 	cfg.disconnect(leader2)
 	// DPrintf("TestReElection2A():cfg.disconnect(%d)",leader2)
 	cfg.disconnect((leader2 + 1) % servers)
-	 DPrintf("TestReElection2A():cfg.disconnect(%d)",(leader2 + 1) % servers)
+	DPrintf("TestReElection2A():cfg.disconnect(%d)", (leader2+1)%servers)
 	time.Sleep(2 * RaftElectionTimeout)
 
 	// check that the one connected server
@@ -133,7 +133,7 @@ func TestBasicAgree2B(t *testing.T) {
 	cfg.begin("Test (2B): basic agreement")
 
 	iters := 3
-	for index := 1; index < iters+1; index++ {
+	for index := 2; index < iters+1; index++ {
 		nd, _ := cfg.nCommitted(index)
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")

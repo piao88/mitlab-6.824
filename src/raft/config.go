@@ -601,6 +601,13 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
+				fmt.Println("-----------one()-dump-log----------")
+				for _, rf := range cfg.rafts {
+					fmt.Printf("peer[%d].logEntries, State:%v :\n", rf.me, rf.State.string())
+					for i, entry := range rf.LogEntries {
+						fmt.Printf("index[%d].Term=%d,index[%d].Command=%v\n", i, entry.Term, i, entry.Command)
+					}
+				}
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
