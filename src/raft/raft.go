@@ -18,7 +18,10 @@ package raft
 //
 
 import (
+	"fmt"
 	"math/rand"
+	"strings"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -35,6 +38,18 @@ const (
 	Candidate
 	Leader
 )
+
+func (st State) string() string {
+	switch st {
+	case Follower:
+		return "Follower"
+	case Candidate:
+		return "Candidate"
+	case Leader:
+		return "Leader"
+	}
+	return ""
+}
 
 //type AppendEntryType int
 //
@@ -97,6 +112,7 @@ type Raft struct {
 	heartBeatCh     chan bool
 	electionCh      chan bool
 	appendEntriesCh chan interface{}
+	successAppendCh chan bool
 	ApplyCh         chan ApplyMsg
 	//appendNoopCh    chan bool
 
@@ -115,14 +131,14 @@ type LogEntry struct {
 	Command interface{}
 }
 
-func (rf *Raft) appendEntries(logEntries ...LogEntry) {
-	for _, entry := range logEntries {
-		rf.LogEntries = append(rf.LogEntries, LogEntry{
-			Term:    entry.Term,
-			Command: entry.Command,
-		})
-	}
-}
+//func (rf *Raft) appendEntries(logEntries ...LogEntry) {
+//	for _, entry := range logEntries {
+//		rf.LogEntries = append(rf.LogEntries, LogEntry{
+//			Term:    entry.Term,
+//			Command: entry.Command,
+//		})
+//	}
+//}
 
 func (rf *Raft) leaseCheckTick() {
 	for {
@@ -264,8 +280,8 @@ type RequestVoteArgs struct {
 	// candidate requesting vote.
 	CandidateId int
 
-	lastLogIndex int
-	lastLogTerm  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -295,6 +311,8 @@ type AppendEntriesRPC struct {
 	// leader's commitIndex
 	LeaderCommit int
 
+	Mark bool
+
 	//Type AppendEntryType
 }
 
@@ -304,6 +322,8 @@ type AppendEntriesResponse struct {
 	// true if follower contained entry matching
 	// prevLogIndex and preLogTerm.
 	Success bool
+
+	ExpiredLeader bool
 }
 
 func (rf *Raft) HeartBeat(req *AppendEntriesRPC, resp *AppendEntriesResponse) {
@@ -313,80 +333,37 @@ func (rf *Raft) HeartBeat(req *AppendEntriesRPC, resp *AppendEntriesResponse) {
 	if rf.lastHeartBeat < now {
 		rf.lastHeartBeat = now
 	}
-	resp.Success = false
-	resp.Term = rf.CurrentTerm
-
-	if req.Term < rf.CurrentTerm {
-		resp.Term = rf.CurrentTerm
-	}
-
-	if req.Term > rf.CurrentTerm {
-		rf.CurrentTerm = req.Term
-	}
-
-	if rf.lastLogIndex() >= req.LeaderCommit {
-		resp.Success = true
-		rf.commitIndex = req.LeaderCommit
-	}
-	applyStart := rf.commitIndex
-
-	for i := applyStart; i <= rf.commitIndex; i++ {
-		//fmt.Printf("peer[%d] apply logEntries[%d] command(%v)\n",rf.me,i,rf.LogEntries[i].Command)
-		go rf.Apply(i, rf.LogEntries[i].Command)
-	}
+	//resp.Success = false
+	//resp.Term = rf.CurrentTerm
+	//
+	//if req.Term < rf.CurrentTerm {
+	//	resp.Term = rf.CurrentTerm
+	//}
+	//
+	//if req.Term > rf.CurrentTerm {
+	//	rf.CurrentTerm = req.Term
+	//}
+	//
+	//if rf.lastLogIndex() >= req.LeaderCommit {
+	//	resp.Success = true
+	//	rf.commitIndex = req.LeaderCommit
+	//}
+	//applyStart := rf.commitIndex
+	//
+	//for i := applyStart; i <= rf.commitIndex; i++ {
+	//	//fmt.Printf("peer[%d] apply logEntries[%d] command(%v)\n",rf.me,i,rf.LogEntries[i].Command)
+	//	go rf.Apply(i, rf.LogEntries[i].Command)
+	//}
 
 }
 
 func (rf *Raft) Apply(index int, cmd interface{}) {
+	fmt.Printf("peer[%d] apply logEntries[%d] command(%v)\n", rf.me, index, rf.LogEntries[index].Command)
 	rf.ApplyCh <- ApplyMsg{
 		CommandValid: true,
 		Command:      cmd,
 		CommandIndex: index,
 	}
-}
-
-func (rf *Raft) AppendEntries(req *AppendEntriesRPC, resp *AppendEntriesResponse) {
-	resp.Success = false
-	resp.Term = rf.CurrentTerm
-
-	if req.Term < rf.CurrentTerm {
-		resp.Term = rf.CurrentTerm
-	}
-
-	if req.Term > rf.CurrentTerm {
-		rf.CurrentTerm = req.Term
-	}
-
-	if req.PrevLogIndex > rf.lastLogIndex() {
-		return
-	}
-	if rf.LogEntries[req.PrevLogIndex].Term != req.PrevLogTerm {
-		return
-	}
-
-	//if req.PrevLogIndex == -1 {
-	//	resp.Success = true
-	//	rf.commitIndex = req.LeaderCommit
-	//}
-	applyStart := rf.commitIndex
-
-	rf.LogEntries = rf.LogEntries[:req.PrevLogIndex+1]
-	rf.LogEntries = append(rf.LogEntries, req.Entries...)
-
-	if rf.lastLogIndex() >= req.LeaderCommit {
-		resp.Success = true
-		rf.commitIndex = req.LeaderCommit
-	}
-
-	for i := applyStart; i <= rf.commitIndex; i++ {
-		//fmt.Printf("peer[%d] apply logEntries[%d] command(%v)\n",rf.me,i,rf.LogEntries[i].Command)
-		go rf.Apply(i, rf.LogEntries[i].Command)
-	}
-
-	//for i, entry := range rf.LogEntries {
-	//	fmt.Printf("peer[%d] logEntries[%d] command(%v)\n", rf.me, i, entry.Command)
-	//}
-
 }
 
 //
@@ -428,26 +405,6 @@ func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesRPC, reply *AppendE
 	return ok
 }
 
-func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesRPC, resp *AppendEntriesResponse, ch *chan Operation) bool {
-
-	ok := rf.peers[server].Call("Raft.AppendEntries", req, resp)
-
-	if ok {
-		if resp.Success {
-			*ch <- Operation{Peer: server, Success: true}
-		} else if resp.Term > rf.CurrentTerm {
-			rf.CurrentTerm = resp.Term
-			rf.turnTo(Follower)
-		} else {
-			*ch <- Operation{Peer: server, Left: true}
-		}
-	} else {
-		*ch <- Operation{Peer: server, RpcFail: true}
-	}
-
-	return ok
-}
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -480,6 +437,16 @@ func (rf *Raft) Start(cmd interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 	rf.appendEntriesCh <- cmd
+
+	//timer := time.NewTimer(100 * time.Second)
+	//
+	//select {
+	//case <-rf.successAppendCh:
+	//	break
+	//
+	//case <-timer.C:
+	//
+	//}
 
 	return index, term, isLeader
 }
@@ -515,6 +482,11 @@ func (rf *Raft) turnTo(state State) {
 }
 
 func (rf *Raft) BroadcastHeartBeat() {
+	if rf.commitIndex == 0 {
+		//go rf.Apply(0, rf.LogEntries[0].Command)
+		go rf.Apply(1, rf.LogEntries[1].Command)
+		rf.commitIndex = 1
+	}
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
@@ -522,15 +494,21 @@ func (rf *Raft) BroadcastHeartBeat() {
 
 		go func(rf *Raft, i int) {
 
-			request := &AppendEntriesRPC{
-				Term:         rf.CurrentTerm,
-				LeaderId:     rf.me,
-				LeaderCommit: rf.commitIndex,
-			}
+			//request := &AppendEntriesRPC{
+			//	Term:         rf.CurrentTerm,
+			//	LeaderId:     rf.me,
+			//	LeaderCommit: rf.commitIndex,
+			//}
+			request := rf.newAppendEntriesRPC(-1, rf.nextIndex[i], true)
 			response := &AppendEntriesResponse{}
+			if len(request.Entries) > 0 {
+				str := fmt.Sprintf("%v", request.Entries[0].Command)
+				if strings.Contains(str, "102") {
+					fmt.Printf("sendHeartBeat to 102\n")
+				}
+			}
 
-			//ch := make(chan Operation)
-			if rf.sendHeartBeat(i, request, response) {
+			if rf.sendAppendEntries(i, request, response) {
 				now := time.Now().UnixNano()
 				if now > rf.lastLeaderReply {
 					rf.lastLeaderReply = now
@@ -542,7 +520,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 
 func (rf *Raft) newAppendEntriesRPC(peer int, index int, toEnd bool) *AppendEntriesRPC {
 	if index == 0 {
-		//		panic("why index = 0?")
+		//	panic("why index = 0?")
 	}
 
 	var entries []LogEntry
@@ -580,62 +558,233 @@ func (rf *Raft) lastLogIndex() int {
 	return len(rf.LogEntries) - 1
 }
 
-func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
+func (rf *Raft) AppendEntries(req *AppendEntriesRPC, resp *AppendEntriesResponse) {
+	resp.Success = false
+	resp.Term = rf.CurrentTerm
+	resp.ExpiredLeader = false
+
+	if req.Mark {
+		fmt.Printf("got 102+++++++++++++++++\n")
+	}
+	if req.Term < rf.CurrentTerm {
+		resp.Term = rf.CurrentTerm
+		resp.ExpiredLeader = true
+		return
+	}
+
+	if req.Term > rf.CurrentTerm {
+		rf.CurrentTerm = req.Term
+	}
+
+	rf.HeartBeat(req, resp)
+
+	if req.PrevLogIndex > rf.lastLogIndex() {
+		return
+	}
+	if rf.LogEntries[req.PrevLogIndex].Term != req.PrevLogTerm {
+		return
+	}
+
+	//if req.PrevLogIndex == -1 {
+	//	resp.Success = true
+	//	rf.commitIndex = req.LeaderCommit
+	//}
+	originCommitIndex := rf.commitIndex
+
+	rf.LogEntries = rf.LogEntries[:req.PrevLogIndex+1]
+	rf.LogEntries = append(rf.LogEntries, req.Entries...)
+
+	//if rf.commitIndex == req.LeaderCommit {
+	//	resp.Success = true
+	//	resp.NoMoreApply = true
+	//	return
+	//}
+
+	resp.Success = true
+	rf.commitIndex = req.LeaderCommit
+
+	if len(req.Entries) > 0 {
+		str := fmt.Sprintf("%v", req.Entries[0].Command)
+		if strings.Contains(str, "102") {
+			fmt.Printf("follower[%d] deal with 102\n", rf.me)
+		}
+	}
+
+	if originCommitIndex < rf.commitIndex {
+		for i := originCommitIndex + 1; i <= rf.commitIndex; i++ {
+			//fmt.Printf("peer[%d] apply logEntries[%d] command(%v)\n",rf.me,i,rf.LogEntries[i].Command)
+			rf.Apply(i, rf.LogEntries[i].Command)
+		}
+		//resp.NextIndex = rf.lastLogIndex() + 1
+	}
+
+	//if rf.lastLogIndex() < req.LeaderCommit {
+	//	rf.commitIndex = rf.lastLogIndex()
+	//}else{
+	//
+	//}
 
 	//for i, entry := range rf.LogEntries {
 	//	fmt.Printf("peer[%d] logEntries[%d] command(%v)\n", rf.me, i, entry.Command)
 	//}
 
-	operationCh := make(chan Operation)
+}
+
+func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesRPC, resp *AppendEntriesResponse) bool {
+
+	//startTime := time.Now().UnixNano()
+
+	ok := rf.peers[server].Call("Raft.AppendEntries", req, resp)
+	//
+	//for {
+	//	elapseTime := time.Now().UnixNano()
+	//	if elapseTime-startTime > 100*1000*1000 {
+	//
+	//	}
+	//}
+	//if len(req.Entries) > 0 {
+	//	str := fmt.Sprintf("%v", req.Entries[0].Command)
+	//	if strings.Contains(str, "102") {
+	//		fmt.Printf("sendAppendEntries deal with 102\n")
+	//	}
+	//}
+	//if ok {
+	//	if resp.Success {
+	//		*ch <- Operation{Peer: server, Success: true}
+	//		//if resp.NextIndex != -1 {
+	//		//	rf.nextIndex[server] = resp.NextIndex
+	//		//}
+	//	} else if resp.Term > rf.CurrentTerm {
+	//		rf.CurrentTerm = resp.Term
+	//		rf.turnTo(Follower)
+	//	} else if resp.ExpiredLeader {
+	//
+	//	} else {
+	//		*ch <- Operation{Peer: server, Left: true}
+	//	}
+	//} else {
+	//	*ch <- Operation{Peer: server, RpcFail: true}
+	//}
+
+	return ok
+}
+
+func (rf *Raft) resetNextIndex(index int) {
+	for i, _ := range rf.nextIndex {
+		rf.nextIndex[i] = index
+	}
+}
+
+func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
+	fmt.Printf("BroadcastAppendEntries(): Command=%v,commitIndex=%d\n", cmd, rf.commitIndex)
+
+	rf.resetNextIndex(rf.lastLogIndex())
+
+	//fmt.Printf("nextIndex: %d\n", rf.lastLogIndex())
+
+	//for i, entry := range rf.LogEntries {
+	//	fmt.Printf("peer[%d] logEntries[%d] command(%v)\n", rf.me, i, entry.Command)
+	//}
+
+	operationCh := make(chan bool)
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		go func(rf *Raft, i int, ch *chan Operation) {
+		go func(rf *Raft, i int, ch *chan bool) {
 			req := rf.newAppendEntriesRPC(i, rf.lastLogIndex(), false)
-			resp := &AppendEntriesResponse{}
-			DPrintf("BroadcastAppendEntries():sendAppendEntriesRPC():%v", req)
-			if rf.sendAppendEntries(i, req, resp, &operationCh) {
+			if len(req.Entries) > 0 {
+				str := fmt.Sprintf("%v", req.Entries[0].Command)
+				if strings.Contains(str, "102") {
+					req.Mark = true
+					fmt.Printf("BroadcastAppendEntries():sendAppendEntriesRPC()+++marked+++:%v\n", req)
+				}
 			}
+			resp := &AppendEntriesResponse{}
+
+			ok := rf.sendAppendEntries(i, req, resp)
+			fmt.Printf("~~~~~~to peer[%d],ok=%v\n", i, ok)
+
+			if ok {
+				if resp.Success {
+					//if len(req.Entries) > 0 {
+					//	str := fmt.Sprintf("%v", req.Entries[0].Command)
+					//	if strings.Contains(str, "102") {
+					//		fmt.Printf("peer[%d] appendentries 102 success\n", i)
+					//	}
+					//}
+					rf.nextIndex[i] = rf.commitIndex + 1
+					*ch <- true
+				} else if resp.Term > rf.CurrentTerm {
+					rf.CurrentTerm = resp.Term
+					rf.turnTo(Follower)
+				} else if resp.ExpiredLeader {
+
+				} else {
+					rf.nextIndex[i]--
+					go rf.sendAppendEntries(
+						i,
+						rf.newAppendEntriesRPC(-1, rf.nextIndex[i], true),
+						&AppendEntriesResponse{},
+					)
+				}
+			} else {
+				fmt.Printf("rpc fail ++++++\n")
+				//rpc fail
+				//go rf.sendAppendEntries(
+				//	i,
+				//	rf.newAppendEntriesRPC(-1, rf.nextIndex[i], true),
+				//	&AppendEntriesResponse{},
+				//)
+			}
+
 		}(rf, i, &operationCh)
 
 		successCount := 1
+		//startTime := time.Now().UnixNano()
+		//	timer := time.NewTimer(1000 * time.Second)
 		for {
+			//elapseTime := time.Now().UnixNano()
+			//if elapseTime-startTime > 10*1000*1000 {
+			//	rf.appendEntriesCh <- cmd
+			//	break
+			//}
 			if _, isLeader := rf.GetState(); !isLeader {
 				break
 			}
 			if successCount > len(rf.peers)/2 {
-				applyStart := rf.commitIndex
+				applyStart := rf.commitIndex + 1
 				rf.commitIndex = rf.lastLogIndex()
+				fmt.Printf("new leader commitIndex:%d\n", rf.commitIndex)
+				//if applyStart == rf.commitIndex {
+				//	break
+				//}
 				for j := applyStart; j <= rf.commitIndex; j++ {
 					go rf.Apply(j, rf.LogEntries[j].Command)
 				}
+				rf.heartBeatCh <- true
+				fmt.Printf("send heartbeat\n")
 				break
 			}
+
+			//timeout := false
 			select {
-			case op := <-operationCh:
-				if op.Left {
-					rf.nextIndex[op.Peer]--
-					go rf.sendAppendEntries(
-						op.Peer,
-						rf.newAppendEntriesRPC(op.Peer, rf.nextIndex[op.Peer], true),
-						&AppendEntriesResponse{},
-						&operationCh,
-					)
-				}
-				if op.Success {
-					rf.nextIndex[op.Peer] = rf.commitIndex + 1
+			case ok := <-operationCh:
+				if ok {
 					successCount++
+					fmt.Printf("success count = %d\n", successCount)
+
 				}
-				if op.RpcFail {
-					go rf.sendAppendEntries(
-						op.Peer,
-						rf.newAppendEntriesRPC(op.Peer, rf.nextIndex[op.Peer], false),
-						&AppendEntriesResponse{},
-						&operationCh,
-					)
-				}
+				//case <-timer.C:
+				//	timeout = true
 			}
+
+			//if timeout {
+			//	go rf.BroadcastAppendEntries(cmd)
+			//	close(operationCh)
+			//	break
+			//}
+
 		}
 	}
 }
@@ -653,10 +802,10 @@ func (rf *Raft) RequestVote(request *RequestVoteArgs, response *RequestVoteReply
 	defer rf.mu.Unlock()
 
 	if request.Term > rf.CurrentTerm || (request.Term == rf.CurrentTerm && rf.VotedFor != -1) {
-		if request.lastLogTerm < rf.lastLogTerm() || (request.lastLogTerm == rf.lastLogTerm() && request.lastLogIndex < rf.lastLogIndex()) {
+		if request.LastLogTerm < rf.lastLogTerm() || (request.LastLogTerm == rf.lastLogTerm() && request.LastLogIndex < rf.lastLogIndex()) {
 			response.Term, response.VoteGranted = rf.CurrentTerm, false
 			DPrintf("RequestVote(): (peer[%d],currentTerm[%d], lastLogTerm[%d], lastLogIndex[%d]) reject (peer[%d],voteTerm[%d],lastLogTerm[%d],lastLogIndex[%d],)\n",
-				rf.me, rf.CurrentTerm, rf.lastLogTerm(), rf.lastLogIndex(), request.CandidateId, request.Term, request.lastLogTerm, request.lastLogIndex)
+				rf.me, rf.CurrentTerm, rf.lastLogTerm(), rf.lastLogIndex(), request.CandidateId, request.Term, request.LastLogTerm, request.LastLogIndex)
 			return
 		}
 		rf.turnTo(Follower)
@@ -696,8 +845,8 @@ func (rf *Raft) StartElection() {
 			request := &RequestVoteArgs{
 				Term:         rf.CurrentTerm,
 				CandidateId:  rf.me,
-				lastLogIndex: rf.lastLogIndex(),
-				lastLogTerm:  rf.lastLogTerm(),
+				LastLogIndex: rf.lastLogIndex(),
+				LastLogTerm:  rf.lastLogTerm(),
 			}
 			response := &RequestVoteReply{}
 
@@ -779,7 +928,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.State = Follower
 	rf.commitIndex = 0
-	rf.LogEntries = make([]LogEntry, 1)
+	rf.LogEntries = make([]LogEntry, 2)
 	rf.electionCh = make(chan bool)
 	rf.heartBeatCh = make(chan bool)
 	rf.appendEntriesCh = make(chan interface{})
@@ -788,9 +937,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.matchIndex = make([]int, len(peers))
 	rf.nextIndex = make([]int, len(peers))
-	//for i, _ := range rf.nextIndex {
-	//	rf.nextIndex[i] = 1
-	//}
+	for i, _ := range rf.nextIndex {
+		rf.nextIndex[i] = 1
+	}
 
 	// Your initialization code here (2A, 2B, 2C).
 	go rf.electionTick()
