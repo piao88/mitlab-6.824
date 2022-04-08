@@ -401,7 +401,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) sendHeartBeat(server int, args *AppendEntriesRPC, reply *AppendEntriesResponse) bool {
-	ok := rf.peers[server].Call("Raft.HeartBeat", args, reply)
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -468,8 +468,8 @@ func (rf *Raft) Kill() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	rf.turnTo(Follower)
-	DPrintf("kill peer[%d]", rf.me)
+	//rf.turnTo(Follower)
+	//DPrintf("kill peer[%d]", rf.me)
 }
 
 func (rf *Raft) killed() bool {
@@ -482,6 +482,7 @@ func (rf *Raft) turnTo(state State) {
 }
 
 func (rf *Raft) BroadcastHeartBeat() {
+
 	if rf.commitIndex == 0 {
 		//go rf.Apply(0, rf.LogEntries[0].Command)
 		go rf.Apply(1, rf.LogEntries[1].Command)
@@ -501,17 +502,19 @@ func (rf *Raft) BroadcastHeartBeat() {
 			//}
 			request := rf.newAppendEntriesRPC(-1, rf.commitIndex, true)
 			response := &AppendEntriesResponse{}
-			if len(request.Entries) > 0 {
-				str := fmt.Sprintf("%v", request.Entries[0].Command)
-				if strings.Contains(str, "102") {
-					fmt.Printf("sendHeartBeat,request:%v\n", request)
-				}
-			}
+
+			//	fmt.Printf("sendHeartBeat,request:%v\n", request)
+			//if len(request.Entries) > 0 {
+			//	str := fmt.Sprintf("%v", request.Entries[0].Command)
+			//	if strings.Contains(str, "102") {
+			//		fmt.Printf("sendHeartBeat,request:%v\n", request)
+			//	}
+			//}
 
 			//fmt.Printf("sendHeartBeat,request:%v\n", request)
-			ch := make(chan Operation)
+			//ch := make(chan Operation)
 
-			if rf.sendAppendEntries(i, request, response, &ch) {
+			if rf.sendHeartBeat(i, request, response) {
 				now := time.Now().UnixNano()
 				if now > rf.lastLeaderReply {
 					rf.lastLeaderReply = now
@@ -562,13 +565,15 @@ func (rf *Raft) lastLogIndex() int {
 }
 
 func (rf *Raft) AppendEntries(req *AppendEntriesRPC, resp *AppendEntriesResponse) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	resp.Success = false
 	resp.Term = rf.CurrentTerm
 	resp.ExpiredLeader = false
 
 	if req.Mark {
 		fmt.Printf("got 102+++++++++++++++++,return true\n")
-		fmt.Printf("rf.logEntries=%v, rf.commitIndex=%d\n", rf.LogEntries, rf.commitIndex)
+		fmt.Printf("peer[%d] rf.logEntries=%v, rf.commitIndex=%d\n", rf.me, rf.LogEntries, rf.commitIndex)
 		fmt.Printf("req.preIndex=%d,req.Entries=%v\n", req.PrevLogIndex, req.Entries)
 	}
 
@@ -636,11 +641,21 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRPC, resp *AppendEntriesResponse
 
 }
 
-func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesRPC, resp *AppendEntriesResponse, ch *chan Operation) bool {
+func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesRPC, resp *AppendEntriesResponse, ch chan Operation) bool {
 
-	//startTime := time.Now().UnixNano()
+	startTime := time.Now().UnixNano()
 
 	ok := rf.peers[server].Call("Raft.AppendEntries", req, resp)
+
+	endTime := time.Now().UnixNano()
+	if len(req.Entries) > 0 {
+		str := fmt.Sprintf("%v", req.Entries[0].Command)
+		if strings.Contains(str, "102") {
+			fmt.Printf("To [%d] appendentries 102 time:%d\n", server, (endTime-startTime)/1000/1000/1000)
+		}
+	}
+
+	fmt.Printf("To [%d] appendentries time:%d\n", server, (endTime-startTime)/1000/1000/1000)
 	//
 	//for {
 	//	elapseTime := time.Now().UnixNano()
@@ -656,20 +671,21 @@ func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesRPC, resp *Appen
 	//}
 	if ok {
 		if resp.Success {
-			*ch <- Operation{Peer: server, Success: true}
+			ch <- Operation{Peer: server, Success: true}
 			//if resp.NextIndex != -1 {
 			//	rf.nextIndex[server] = resp.NextIndex
 			//}
 		} else if resp.Term > rf.CurrentTerm {
 			rf.CurrentTerm = resp.Term
 			rf.turnTo(Follower)
+			//fmt.Printf("________turn to follower_______")
 		} else if resp.ExpiredLeader {
 
 		} else {
-			*ch <- Operation{Peer: server, Left: true}
+			ch <- Operation{Peer: server, Left: true}
 		}
 	} else {
-		*ch <- Operation{Peer: server, RpcFail: true}
+		ch <- Operation{Peer: server, RpcFail: true}
 	}
 
 	return ok
@@ -682,7 +698,7 @@ func (rf *Raft) resetNextIndex(index int) {
 }
 
 func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
-	fmt.Printf("BroadcastAppendEntries(): Command=%v,commitIndex=%d\n", cmd, rf.commitIndex)
+	//fmt.Printf("BroadcastAppendEntries(): Command=%v,commitIndex=%d\n", cmd, rf.commitIndex)
 
 	rf.resetNextIndex(rf.lastLogIndex())
 
@@ -697,7 +713,8 @@ func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
 		if i == rf.me {
 			continue
 		}
-		go func(rf *Raft, i int, ch *chan Operation) {
+
+		go func(rf *Raft, i int, ch chan Operation) {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 			req := rf.newAppendEntriesRPC(i, rf.lastLogIndex(), false)
@@ -705,7 +722,7 @@ func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
 				str := fmt.Sprintf("%v", req.Entries[0].Command)
 				if strings.Contains(str, "102") {
 					req.Mark = true
-					fmt.Printf("BroadcastAppendEntries():sendAppendEntriesRPC()+++marked+++:%v\n", req)
+					fmt.Printf("BroadcastAppendEntries():sendAppendEntriesRPC()+++marked+++ to peer[%d]:%v\n", i, req)
 				}
 			}
 			resp := &AppendEntriesResponse{}
@@ -746,7 +763,7 @@ func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
 			//)
 			//}
 
-		}(rf, i, &operationCh)
+		}(rf, i, operationCh)
 
 		successCount := 1
 		for {
@@ -759,6 +776,7 @@ func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
 				for j := applyStart; j <= rf.commitIndex; j++ {
 					rf.Apply(j, rf.LogEntries[j].Command)
 				}
+				rf.heartBeatCh <- true
 				break
 			}
 			//timer := time.NewTimer(100 * 1000 * 1000)
@@ -771,7 +789,7 @@ func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
 						op.Peer,
 						rf.newAppendEntriesRPC(op.Peer, rf.nextIndex[op.Peer], true),
 						&AppendEntriesResponse{},
-						&operationCh,
+						operationCh,
 					)
 				}
 				if op.Success {
@@ -785,7 +803,7 @@ func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
 						op.Peer,
 						rf.newAppendEntriesRPC(op.Peer, rf.nextIndex[op.Peer], false),
 						&AppendEntriesResponse{},
-						&operationCh,
+						operationCh,
 					)
 				}
 				//case <-timer.C:
