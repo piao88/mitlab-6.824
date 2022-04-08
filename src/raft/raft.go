@@ -499,16 +499,19 @@ func (rf *Raft) BroadcastHeartBeat() {
 			//	LeaderId:     rf.me,
 			//	LeaderCommit: rf.commitIndex,
 			//}
-			request := rf.newAppendEntriesRPC(-1, rf.nextIndex[i], true)
+			request := rf.newAppendEntriesRPC(-1, rf.commitIndex, true)
 			response := &AppendEntriesResponse{}
 			if len(request.Entries) > 0 {
 				str := fmt.Sprintf("%v", request.Entries[0].Command)
 				if strings.Contains(str, "102") {
-					fmt.Printf("sendHeartBeat to 102\n")
+					fmt.Printf("sendHeartBeat,request:%v\n", request)
 				}
 			}
 
-			if rf.sendAppendEntries(i, request, response) {
+			//fmt.Printf("sendHeartBeat,request:%v\n", request)
+			ch := make(chan Operation)
+
+			if rf.sendAppendEntries(i, request, response, &ch) {
 				now := time.Now().UnixNano()
 				if now > rf.lastLeaderReply {
 					rf.lastLeaderReply = now
@@ -564,8 +567,11 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRPC, resp *AppendEntriesResponse
 	resp.ExpiredLeader = false
 
 	if req.Mark {
-		fmt.Printf("got 102+++++++++++++++++\n")
+		fmt.Printf("got 102+++++++++++++++++,return true\n")
+		fmt.Printf("rf.logEntries=%v, rf.commitIndex=%d\n", rf.LogEntries, rf.commitIndex)
+		fmt.Printf("req.preIndex=%d,req.Entries=%v\n", req.PrevLogIndex, req.Entries)
 	}
+
 	if req.Term < rf.CurrentTerm {
 		resp.Term = rf.CurrentTerm
 		resp.ExpiredLeader = true
@@ -603,12 +609,12 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRPC, resp *AppendEntriesResponse
 	resp.Success = true
 	rf.commitIndex = req.LeaderCommit
 
-	if len(req.Entries) > 0 {
-		str := fmt.Sprintf("%v", req.Entries[0].Command)
-		if strings.Contains(str, "102") {
-			fmt.Printf("follower[%d] deal with 102\n", rf.me)
-		}
-	}
+	//if len(req.Entries) > 0 {
+	//	str := fmt.Sprintf("%v", req.Entries[0].Command)
+	//	if strings.Contains(str, "102") {
+	//		fmt.Printf("follower[%d] deal with 102\n", rf.me)
+	//	}
+	//}
 
 	if originCommitIndex < rf.commitIndex {
 		for i := originCommitIndex + 1; i <= rf.commitIndex; i++ {
@@ -630,7 +636,7 @@ func (rf *Raft) AppendEntries(req *AppendEntriesRPC, resp *AppendEntriesResponse
 
 }
 
-func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesRPC, resp *AppendEntriesResponse) bool {
+func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesRPC, resp *AppendEntriesResponse, ch *chan Operation) bool {
 
 	//startTime := time.Now().UnixNano()
 
@@ -648,23 +654,23 @@ func (rf *Raft) sendAppendEntries(server int, req *AppendEntriesRPC, resp *Appen
 	//		fmt.Printf("sendAppendEntries deal with 102\n")
 	//	}
 	//}
-	//if ok {
-	//	if resp.Success {
-	//		*ch <- Operation{Peer: server, Success: true}
-	//		//if resp.NextIndex != -1 {
-	//		//	rf.nextIndex[server] = resp.NextIndex
-	//		//}
-	//	} else if resp.Term > rf.CurrentTerm {
-	//		rf.CurrentTerm = resp.Term
-	//		rf.turnTo(Follower)
-	//	} else if resp.ExpiredLeader {
-	//
-	//	} else {
-	//		*ch <- Operation{Peer: server, Left: true}
-	//	}
-	//} else {
-	//	*ch <- Operation{Peer: server, RpcFail: true}
-	//}
+	if ok {
+		if resp.Success {
+			*ch <- Operation{Peer: server, Success: true}
+			//if resp.NextIndex != -1 {
+			//	rf.nextIndex[server] = resp.NextIndex
+			//}
+		} else if resp.Term > rf.CurrentTerm {
+			rf.CurrentTerm = resp.Term
+			rf.turnTo(Follower)
+		} else if resp.ExpiredLeader {
+
+		} else {
+			*ch <- Operation{Peer: server, Left: true}
+		}
+	} else {
+		*ch <- Operation{Peer: server, RpcFail: true}
+	}
 
 	return ok
 }
@@ -686,12 +692,14 @@ func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
 	//	fmt.Printf("peer[%d] logEntries[%d] command(%v)\n", rf.me, i, entry.Command)
 	//}
 
-	operationCh := make(chan bool)
+	operationCh := make(chan Operation)
 	for i, _ := range rf.peers {
 		if i == rf.me {
 			continue
 		}
-		go func(rf *Raft, i int, ch *chan bool) {
+		go func(rf *Raft, i int, ch *chan Operation) {
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			req := rf.newAppendEntriesRPC(i, rf.lastLogIndex(), false)
 			if len(req.Entries) > 0 {
 				str := fmt.Sprintf("%v", req.Entries[0].Command)
@@ -702,91 +710,91 @@ func (rf *Raft) BroadcastAppendEntries(cmd interface{}) {
 			}
 			resp := &AppendEntriesResponse{}
 
-			ok := rf.sendAppendEntries(i, req, resp)
-			fmt.Printf("~~~~~~to peer[%d],ok=%v\n", i, ok)
+			rf.sendAppendEntries(i, req, resp, ch)
+			//fmt.Printf("~~~~~~to peer[%d],ok=%v\n", i, ok)
 
-			if ok {
-				if resp.Success {
-					//if len(req.Entries) > 0 {
-					//	str := fmt.Sprintf("%v", req.Entries[0].Command)
-					//	if strings.Contains(str, "102") {
-					//		fmt.Printf("peer[%d] appendentries 102 success\n", i)
-					//	}
-					//}
-					rf.nextIndex[i] = rf.commitIndex + 1
-					*ch <- true
-				} else if resp.Term > rf.CurrentTerm {
-					rf.CurrentTerm = resp.Term
-					rf.turnTo(Follower)
-				} else if resp.ExpiredLeader {
-
-				} else {
-					rf.nextIndex[i]--
-					go rf.sendAppendEntries(
-						i,
-						rf.newAppendEntriesRPC(-1, rf.nextIndex[i], true),
-						&AppendEntriesResponse{},
-					)
-				}
-			} else {
-				fmt.Printf("rpc fail ++++++\n")
-				//rpc fail
-				//go rf.sendAppendEntries(
-				//	i,
-				//	rf.newAppendEntriesRPC(-1, rf.nextIndex[i], true),
-				//	&AppendEntriesResponse{},
-				//)
-			}
+			//if ok {
+			//	if resp.Success {
+			//		//if len(req.Entries) > 0 {
+			//		//	str := fmt.Sprintf("%v", req.Entries[0].Command)
+			//		//	if strings.Contains(str, "102") {
+			//		//		fmt.Printf("peer[%d] appendentries 102 success\n", i)
+			//		//	}
+			//		//}
+			//		rf.nextIndex[i] = rf.commitIndex + 1
+			//		*ch <- true
+			//	} else if resp.Term > rf.CurrentTerm {
+			//		rf.CurrentTerm = resp.Term
+			//		rf.turnTo(Follower)
+			//	} else if resp.ExpiredLeader {
+			//
+			//	} else {
+			//		rf.nextIndex[i]--
+			//		go rf.sendAppendEntries(
+			//			i,
+			//			rf.newAppendEntriesRPC(-1, rf.nextIndex[i], true),
+			//			&AppendEntriesResponse{},
+			//		)
+			//	}
+			//} else {
+			//fmt.Printf("rpc fail ++++++\n")
+			//rpc fail
+			//go rf.sendAppendEntries(
+			//	i,
+			//	rf.newAppendEntriesRPC(-1, rf.nextIndex[i], true),
+			//	&AppendEntriesResponse{},
+			//)
+			//}
 
 		}(rf, i, &operationCh)
 
 		successCount := 1
-		//startTime := time.Now().UnixNano()
-		//	timer := time.NewTimer(1000 * time.Second)
 		for {
-			//elapseTime := time.Now().UnixNano()
-			//if elapseTime-startTime > 10*1000*1000 {
-			//	rf.appendEntriesCh <- cmd
-			//	break
-			//}
 			if _, isLeader := rf.GetState(); !isLeader {
 				break
 			}
 			if successCount > len(rf.peers)/2 {
-				applyStart := rf.commitIndex + 1
+				applyStart := rf.commitIndex
 				rf.commitIndex = rf.lastLogIndex()
-				fmt.Printf("new leader commitIndex:%d\n", rf.commitIndex)
-				//if applyStart == rf.commitIndex {
-				//	break
-				//}
 				for j := applyStart; j <= rf.commitIndex; j++ {
-					go rf.Apply(j, rf.LogEntries[j].Command)
+					rf.Apply(j, rf.LogEntries[j].Command)
 				}
-				rf.heartBeatCh <- true
-				fmt.Printf("send heartbeat\n")
 				break
 			}
-
-			//timeout := false
+			//timer := time.NewTimer(100 * 1000 * 1000)
 			select {
-			case ok := <-operationCh:
-				if ok {
-					successCount++
-					fmt.Printf("success count = %d\n", successCount)
+			case op := <-operationCh:
 
+				if op.Left {
+					rf.nextIndex[op.Peer]--
+					go rf.sendAppendEntries(
+						op.Peer,
+						rf.newAppendEntriesRPC(op.Peer, rf.nextIndex[op.Peer], true),
+						&AppendEntriesResponse{},
+						&operationCh,
+					)
+				}
+				if op.Success {
+
+					rf.nextIndex[op.Peer] = rf.commitIndex + 1
+					successCount++
+					fmt.Printf("success++ = %d,command=%v\n", successCount, cmd)
+				}
+				if op.RpcFail {
+					go rf.sendAppendEntries(
+						op.Peer,
+						rf.newAppendEntriesRPC(op.Peer, rf.nextIndex[op.Peer], false),
+						&AppendEntriesResponse{},
+						&operationCh,
+					)
 				}
 				//case <-timer.C:
-				//	timeout = true
+				//	rf.appendEntriesCh <- cmd
+				//	return
 			}
-
-			//if timeout {
-			//	go rf.BroadcastAppendEntries(cmd)
-			//	close(operationCh)
-			//	break
-			//}
-
 		}
 	}
+
 }
 
 func (rf *Raft) lastLogTerm() int {
